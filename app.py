@@ -1,47 +1,102 @@
-import google.generativeai as genai
-import base64
+import tensorflow as tf
+import numpy as np
+from tensorflow.keras.preprocessing.image import img_to_array
 from flask import Flask, request, jsonify
+from flask_cors import CORS
+import os
+import base64
+import io
+from PIL import Image
+import time
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
-# Configure the Gemini API with your key
-genai.configure(api_key="AIzaSyC2Rb7z7HTqOjmPWCN7ZmyVW3HQ1TOtPqQ")
+# Get the absolute path to the model file
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'rice_leaf_deficiency_model.h5')
 
-def analyze_images_base64(images, prompt):
+# Load the trained model
+model = tf.keras.models.load_model(MODEL_PATH)
+
+# Define class names based on your labels
+class_names = ['Nitrogen', 'Phosphorus', 'Potassium']
+
+def preprocess_image(image_data):
+    # Convert base64 to image
     try:
-        # Initialize the model - using gemini-1.5-pro for better vision capabilities
-        model = genai.GenerativeModel("gemini-1.5-pro")
+        # Remove the data URL prefix if present
+        if 'base64,' in image_data:
+            image_data = image_data.split('base64,')[1]
         
-        # Prepare contents with prompt and base64 images
-        contents = [prompt]
-        for img in images:
-            contents.append({
-                "inline_data": {
-                    "mime_type": img.get("mime_type", "image/jpeg"),
-                    "data": img.get("data")
-                }
-            })
+        # Decode base64 string
+        image_bytes = base64.b64decode(image_data)
         
-        # Generate content with the images in base64 format
-        response = model.generate_content(contents)
-        return response.text
+        # Convert to PIL Image
+        image = Image.open(io.BytesIO(image_bytes))
+        
+        # Resize image
+        image = image.resize((224, 224))
+        
+        # Convert to array and preprocess
+        img_array = img_to_array(image)
+        img_array = np.expand_dims(img_array, axis=0)
+        img_array = tf.keras.applications.efficientnet.preprocess_input(img_array)
+        
+        return img_array
     except Exception as e:
-        return f"Error generating content: {e}"
+        raise Exception(f"Error preprocessing image: {str(e)}")
 
-@app.route('/analyze', methods=['POST'])
-def analyze():
-    data = request.get_json()
-    if not data or 'images' not in data or 'prompt' not in data:
-        return jsonify({"error": "Missing 'images' or 'prompt' in request body"}), 400
+@app.route('/')
+def home():
+    return jsonify({'message': 'Server is running', 'status': 'ok'})
+
+@app.route('/test')
+def test():
+    return jsonify({'message': 'Test endpoint working', 'status': 'ok'})
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    print("Received prediction request")  # Debug log
     
-    images = data['images']
-    prompt = data['prompt']
-    
-    if not isinstance(images, list):
-        return jsonify({"error": "'images' must be a list"}), 400
-    
-    result = analyze_images_base64(images, prompt)
-    return jsonify({"analysis": result})
+    try:
+        # Get the JSON data from the request
+        data = request.get_json()
+        
+        if not data or 'image' not in data:
+            print("No image data in request")  # Debug log
+            return jsonify({'error': 'No image data provided'}), 400
+        
+        # Get the base64 encoded image
+        image_data = data['image']
+        
+        print("Processing image data...")  # Debug log
+        
+        # Preprocess the image
+        processed_image = preprocess_image(image_data)
+        
+        # Make prediction
+        start_time = time.time()
+        predictions = model.predict(processed_image, verbose=0)
+        end_time = time.time()
+        
+        # Get prediction details
+        predicted_class_idx = np.argmax(predictions[0])
+        confidence = float(np.max(predictions[0]) * 100)
+        inference_time = end_time - start_time
+        
+        return jsonify({
+            'class': int(predicted_class_idx),  # 0, 1, or 2
+            'class_name': class_names[predicted_class_idx],
+            'confidence': confidence,
+            'inference_time': inference_time
+        })
+            
+    except Exception as e:
+        print(f"Error during prediction: {str(e)}")  # Debug log
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True) 
+    print("Starting Flask server...")
+    print(f"Model path: {MODEL_PATH}")
+    print(f"Model exists: {os.path.exists(MODEL_PATH)}")
+    app.run(host='0.0.0.0', debug=True, port=5000)
